@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: circuitforge-temporary-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: MAX_UPLOAD_MB
+        value: "20"
+      - key: FRONTEND_ORIGINS
+        value: "*"
