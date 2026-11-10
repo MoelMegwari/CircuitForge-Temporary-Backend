@@ -1,0 +1,1 @@
+Starter code provided for the CircuitForge AI prototype. Review dependencies and hosting terms before production use.
