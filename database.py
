@@ -1,0 +1,28 @@
+import os
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import datetime
+
+# قراءة رابط MySQL من متغيرات البيئة في Railway
+DATABASE_URL = os.getenv("MYSQL_URL", "mysql://root:jGXjzNoNlJCKPRmnuJtpCZrzvVyNcPht@mysql.railway.internal:3306/railway")
+
+# تعديل البادئة لتعمل مع PyMySQL
+if DATABASE_URL.startswith("mysql://"):
+    DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://", 1)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    linkedin_id = Column(String(255), unique=True, index=True, nullable=False)
+    name = Column(String(255), nullable=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
