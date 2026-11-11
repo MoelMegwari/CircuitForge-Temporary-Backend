@@ -1,35 +1,95 @@
 import os
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from jose import jwt
+from datetime import datetime, timedelta
 
-# 1. إنشاء تطبيق FastAPI أولاً
+# ==========================================
+# 1. إعداد قاعدة البيانات (حل مشكلة Railway)
+# ==========================================
+# Railway توفر متغير DATABASE_URL أو MYSQL_URL تلقائياً
+# نستخدم MYSQL_URL أولاً لأنه الرابط العام (Public) الذي يعمل من خارج الشبكة الداخلية
+DATABASE_URL = os.getenv("MYSQL_URL") or os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("Database URL is not set. Please set MYSQL_URL or DATABASE_URL in Railway variables.")
+
+# إصلاح بسيط: إذا كان الرابط يبدأ بـ mysql:// (وهو ما تفعله Railway غالباً) 
+# نحوله إلى mysql+pymysql:// ليعمل مع SQLAlchemy
+if DATABASE_URL.startswith("mysql://"):
+    DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://", 1)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# تعريف جدول المستخدمين (مثال بسيط، يمكنك تعديله حسب حقولك)
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True)
+    name = Column(String(255))
+    provider = Column(String(50)) # linkedin أو facebook
+
+# إنشاء الجداول عند بدء التشغيل
+Base.metadata.create_all(bind=engine)
+
+# دالة للحصول على جلسة قاعدة البيانات
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ==========================================
+# 2. إعداد التطبيق والـ CORS
+# ==========================================
 app = FastAPI(title="CircuitForge Temporary API")
 
-# 2. إعداد الـ CORS Middleware
-ALLOWED_ORIGINS = ["*"] # أو يمكنك تعديلها حسب الحاجة
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if ALLOWED_ORIGINS == ["*"] else ALLOWED_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"], # يفضل تعديلها لاحقاً لدومين الفرونت إند فقط
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# قراءة متغيرات البيئة الخاصة بـ LinkedIn
+# ==========================================
+# 3. متغيرات البيئة
+# ==========================================
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
 LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
 LINKEDIN_REDIRECT_URI = os.getenv("REDIRECT_URI", "https://web-production-598c28d9.up.railway.app/auth/linkedin/callback")
 
-# قراءة متغيرات البيئة الخاصة بـ Facebook (باستخدام CLIENT_ID و CLIENT_SECRET و CALLBACK_URL التي أضفناها)
 FACEBOOK_CLIENT_ID = os.getenv("CLIENT_ID")
 FACEBOOK_CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 FACEBOOK_REDIRECT_URI = os.getenv("CALLBACK_URL", "https://web-production-598c28d9.up.railway.app/auth/facebook/callback")
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://web-production-598c28d9.up.railway.app")
+# رابط الفرونت إند (يجب تعيينه في Railway)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://your-frontend-domain.up.railway.app")
 
-# 3. المسارات الأساسية (MVP / Health)
+# مفتاح JWT (يجب تعيينه في Railway)
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-me")
+ALGORITHM = "HS256"
+
+# ==========================================
+# 4. دوال مساعدة لإنشاء التوكن
+# ==========================================
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(hours=24)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+# ==========================================
+# 5. المسارات الأساسية
+# ==========================================
 @app.get("/")
 def root():
     return {"message": "CircuitForge Temporary API is running"}
@@ -39,7 +99,7 @@ def health():
     return {"status": "healthy"}
 
 # ==========================================
-# 4. مسارات LinkedIn OAuth (كما هي بدون تغيير)
+# 6. مسارات LinkedIn OAuth
 # ==========================================
 @app.get("/auth/linkedin/login")
 def linkedin_login():
@@ -60,7 +120,7 @@ def linkedin_login():
     return RedirectResponse(url=auth_url)
 
 @app.get("/auth/linkedin/callback")
-async def linkedin_callback(code: str = None, error: str = None):
+async def linkedin_callback(code: str = None, error: str = None, db: Session = Depends(get_db)):
     if error:
         raise HTTPException(status_code=400, detail=f"LinkedIn Auth Error: {error}")
     if not code:
@@ -92,15 +152,26 @@ async def linkedin_callback(code: str = None, error: str = None):
         
         user_info = user_response.json()
 
-    return {
-        "status": "success",
-        "message": "LinkedIn authentication successful",
-        "user_profile": user_info
-    }
-
+    # --- حفظ المستخدم في قاعدة البيانات (مثال) ---
+    email = user_info.get("email")
+    name = user_info.get("name")
+    if email:
+        db_user = db.query(User).filter(User.email == email).first()
+        if not db_user:
+            db_user = User(email=email, name=name, provider="linkedin")
+            db.add(db_user)
+            db.commit()
+            db.refresh(db_user)
+    
+    # --- إنشاء توكن JWT وإعادة التوجيه للفرونت إند ---
+    jwt_token = create_access_token(data={"sub": email or "unknown", "provider": "linkedin"})
+    
+    # إعادة التوجيه إلى صفحة لوحة التحكم مع تمرير التوكن
+    redirect_url = f"{FRONTEND_URL}/dashboard?token={jwt_token}"
+    return RedirectResponse(url=redirect_url)
 
 # ==========================================
-# 5. مسارات Facebook OAuth الجديدة
+# 7. مسارات Facebook OAuth
 # ==========================================
 @app.get("/auth/facebook/login")
 def facebook_login():
@@ -120,7 +191,7 @@ def facebook_login():
     return RedirectResponse(url=auth_url)
 
 @app.get("/auth/facebook/callback")
-async def facebook_callback(code: str = None, error: str = None):
+async def facebook_callback(code: str = None, error: str = None, db: Session = Depends(get_db)):
     if error:
         raise HTTPException(status_code=400, detail=f"Facebook Auth Error: {error}")
     if not code:
@@ -135,7 +206,6 @@ async def facebook_callback(code: str = None, error: str = None):
     }
     
     async with httpx.AsyncClient() as client:
-        # جلب الـ Access Token من فيسبوك
         token_response = await client.get(token_url, params=params)
         if token_response.status_code != 200:
             raise HTTPException(status_code=400, detail=f"Failed to fetch Facebook token: {token_response.text}")
@@ -143,7 +213,6 @@ async def facebook_callback(code: str = None, error: str = None):
         token_data = token_response.json()
         access_token = token_data.get("access_token")
 
-        # جلب بيانات المستخدم من Graph API
         userinfo_url = "https://graph.facebook.com/v18.0/me"
         user_params = {
             "fields": "id,name,email",
@@ -156,9 +225,19 @@ async def facebook_callback(code: str = None, error: str = None):
         
         user_info = user_response.json()
 
-    return {
-        "status": "success",
-        "message": "Facebook authentication successful",
-        "user_profile": user_info
-}
+    # --- حفظ المستخدم في قاعدة البيانات (مثال) ---
+    email = user_info.get("email")
+    name = user_info.get("name")
+    if email:
+        db_user = db.query(User).filter(User.email == email).first()
+        if not db_user:
+            db_user = User(email=email, name=name, provider="facebook")
+            db.add(db_user)
+            db.commit()
+            db.refresh(db_user)
     
+    # --- إنشاء توكن JWT وإعادة التوجيه للفرونت إند ---
+    jwt_token = create_access_token(data={"sub": email or "unknown", "provider": "facebook"})
+    
+    redirect_url = f"{FRONTEND_URL}/dashboard?token={jwt_token}"
+    return RedirectResponse(url=redirect_url)
