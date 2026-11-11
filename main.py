@@ -17,10 +17,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# قراءة المتغيرات البيئية
+# قراءة متغيرات البيئة الخاصة بـ LinkedIn
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
 LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://web-production-598c28d9.up.railway.app/auth/linkedin/callback")
+LINKEDIN_REDIRECT_URI = os.getenv("REDIRECT_URI", "https://web-production-598c28d9.up.railway.app/auth/linkedin/callback")
+
+# قراءة متغيرات البيئة الخاصة بـ Facebook (باستخدام CLIENT_ID و CLIENT_SECRET و CALLBACK_URL التي أضفناها)
+FACEBOOK_CLIENT_ID = os.getenv("CLIENT_ID")
+FACEBOOK_CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+FACEBOOK_REDIRECT_URI = os.getenv("CALLBACK_URL", "https://web-production-598c28d9.up.railway.app/auth/facebook/callback")
+
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://web-production-598c28d9.up.railway.app")
 
 # 3. المسارات الأساسية (MVP / Health)
@@ -32,7 +38,9 @@ def root():
 def health():
     return {"status": "healthy"}
 
-# 4. مسارات LinkedIn OAuth
+# ==========================================
+# 4. مسارات LinkedIn OAuth (كما هي بدون تغيير)
+# ==========================================
 @app.get("/auth/linkedin/login")
 def linkedin_login():
     if not LINKEDIN_CLIENT_ID:
@@ -45,7 +53,7 @@ def linkedin_login():
         f"https://www.linkedin.com/oauth/v2/authorization"
         f"?response_type=code"
         f"&client_id={LINKEDIN_CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"&redirect_uri={LINKEDIN_REDIRECT_URI}"
         f"&state={state}"
         f"&scope={scope}"
     )
@@ -62,7 +70,7 @@ async def linkedin_callback(code: str = None, error: str = None):
     payload = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": LINKEDIN_REDIRECT_URI,
         "client_id": LINKEDIN_CLIENT_ID,
         "client_secret": LINKEDIN_CLIENT_SECRET,
     }
@@ -89,3 +97,68 @@ async def linkedin_callback(code: str = None, error: str = None):
         "message": "LinkedIn authentication successful",
         "user_profile": user_info
     }
+
+
+# ==========================================
+# 5. مسارات Facebook OAuth الجديدة
+# ==========================================
+@app.get("/auth/facebook/login")
+def facebook_login():
+    if not FACEBOOK_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Facebook Client ID is not configured")
+    
+    scope = "email,public_profile"
+    state = "random_facebook_secure_state"
+    
+    auth_url = (
+        f"https://www.facebook.com/v18.0/dialog/oauth"
+        f"?client_id={FACEBOOK_CLIENT_ID}"
+        f"&redirect_uri={FACEBOOK_REDIRECT_URI}"
+        f"&state={state}"
+        f"&scope={scope}"
+    )
+    return RedirectResponse(url=auth_url)
+
+@app.get("/auth/facebook/callback")
+async def facebook_callback(code: str = None, error: str = None):
+    if error:
+        raise HTTPException(status_code=400, detail=f"Facebook Auth Error: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code not found")
+
+    token_url = "https://graph.facebook.com/v18.0/oauth/access_token"
+    params = {
+        "client_id": FACEBOOK_CLIENT_ID,
+        "client_secret": FACEBOOK_CLIENT_SECRET,
+        "redirect_uri": FACEBOOK_REDIRECT_URI,
+        "code": code,
+    }
+    
+    async with httpx.AsyncClient() as client:
+        # جلب الـ Access Token من فيسبوك
+        token_response = await client.get(token_url, params=params)
+        if token_response.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch Facebook token: {token_response.text}")
+        
+        token_data = token_response.json()
+        access_token = token_data.get("access_token")
+
+        # جلب بيانات المستخدم من Graph API
+        userinfo_url = "https://graph.facebook.com/v18.0/me"
+        user_params = {
+            "fields": "id,name,email",
+            "access_token": access_token
+        }
+        
+        user_response = await client.get(userinfo_url, params=user_params)
+        if user_response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch Facebook user profile")
+        
+        user_info = user_response.json()
+
+    return {
+        "status": "success",
+        "message": "Facebook authentication successful",
+        "user_profile": user_info
+}
+    
