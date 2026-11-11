@@ -1,5 +1,9 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 python-multipart==0.0.20
-fastapi==0.115.12
+requests
 httpx
+pymysql
+cryptography
+sqlalchemy
+
