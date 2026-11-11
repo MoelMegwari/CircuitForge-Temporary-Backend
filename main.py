@@ -119,20 +119,63 @@ def facebook_login():
     )
     return RedirectResponse(url=auth_url)
 
-@app.get("/auth/facebook/callback")
-async def facebook_callback(code: str = None, error: str = None):
-    if error:
-        raise HTTPException(status_code=400, detail=f"Facebook Auth Error: {error}")
-    if not code:
-        raise HTTPException(status_code=400, detail="Authorization code not found")
+@app.get("/auth/linkedin/callback")
+def linkedin_callback(code: str = None, error: str = None, db: Session = Depends(get_db)):
+    if error or not code:
+        raise HTTPException(status_code=400, detail=f"Auth error: {error} or code missing")
 
-    token_url = "https://graph.facebook.com/v18.0/oauth/access_token"
-    params = {
-        "client_id": FACEBOOK_CLIENT_ID,
-        "client_secret": FACEBOOK_CLIENT_SECRET,
-        "redirect_uri": FACEBOOK_REDIRECT_URI,
-        "code": code,
-    }
+    try:
+        # 1. تبديل الكود بـ Access Token
+        token_res = requests.post(
+            "https://www.linkedin.com/oauth/v2/accessToken",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": LINKEDIN_CLIENT_ID,
+                "client_secret": LINKEDIN_CLIENT_SECRET,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        
+        if token_res.status_code != 200:
+            raise HTTPException(status_code=401, detail=f"Token failed: {token_res.text}")
+        
+        access_token = token_res.json().get("access_token")
+
+        # 2. جلب بيانات المستخدم من LinkedIn
+        user_res = requests.get(
+            "https://api.linkedin.com/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        
+        if user_res.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Userinfo failed: {user_res.text}")
+        
+        user_info = user_res.json()
+        email = user_info.get("email")
+        name = user_info.get("name")
+        linkedin_id = user_info.get("sub")
+
+        if not email:
+            raise HTTPException(status_code=400, detail="Email not provided by LinkedIn profile.")
+
+        # 3. حفظ المستخدم في قاعدة بيانات MySQL على Railway إذا لم يكن موجوداً
+        db_user = db.query(User).filter(User.email == email).first()
+        if not db_user:
+            db_user = User(linkedin_id=linkedin_id, name=name, email=email)
+            db.add(db_user)
+            db.commit()
+            db.refresh(db_user)
+
+        # 4. التوجيه النهائي لصفحة المحرر على Vercel مع تمرير بيانات المستخدم
+        frontend_editor_url = f"https://megwari-pcb-editor.vercel.app/editor?email={email}&name={name}"
+        return RedirectResponse(url=frontend_editor_url)
+
+    except Exception as e:
+        print(f"CRITICAL ERROR IN CALLBACK: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
     
     async with httpx.AsyncClient() as client:
         # جلب الـ Access Token من فيسبوك
