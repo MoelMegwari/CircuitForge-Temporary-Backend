@@ -224,7 +224,7 @@ async def linkedin_callback(
 
 
 # ============================================================
-# GitHub OAuth  ⭐ جديد
+# GitHub OAuth
 # ============================================================
 @app.get("/auth/github/login")
 def github_login():
@@ -263,21 +263,36 @@ async def github_callback(
     redirect_uri  = _require(GITHUB_REDIRECT_URI, "GITHUB_REDIRECT_URI")
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        # 1) تبديل الكود بـ access_token
+        # 1) تبديل الكود بـ access_token (form-encoded حسب توثيق GitHub)
         token_res = await client.post(
             "https://github.com/login/oauth/access_token",
-            json={
+            data={
                 "client_id":     client_id,
                 "client_secret": client_secret,
                 "code":          code,
                 "redirect_uri":  redirect_uri,
             },
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept":       "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
         )
         if token_res.status_code != 200:
             raise HTTPException(status_code=401, detail=f"GitHub token failed: {token_res.text}")
 
-        access_token = token_res.json().get("access_token")
+        token_data = token_res.json()
+
+        # GitHub بيرجّع 200 حتى في حالة خطأ — لازم نفحص "error" صراحةً
+        if token_data.get("error"):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    f"GitHub OAuth error: {token_data.get('error')} - "
+                    f"{token_data.get('error_description', '')}"
+                ),
+            )
+
+        access_token = token_data.get("access_token")
         if not access_token:
             raise HTTPException(status_code=400, detail="No access_token returned by GitHub")
 
