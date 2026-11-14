@@ -20,9 +20,15 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    linkedin_id = Column(String(255), unique=True, index=True, nullable=False)
-    name = Column(String(255), nullable=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
+    name = Column(String(255), nullable=True)
+
+    # إضافة معرفات مزودي الـ OAuth
+    linkedin_id = Column(String(255), nullable=True, unique=True, index=True)
+    github_id = Column(String(255), nullable=True, unique=True, index=True)
+    gitlab_id = Column(String(255), nullable=True, unique=True, index=True)
+    facebook_id = Column(String(255), nullable=True, unique=True, index=True)
+
     created_at = Column(
         DateTime,
         default=lambda: datetime.datetime.now(datetime.timezone.utc),
