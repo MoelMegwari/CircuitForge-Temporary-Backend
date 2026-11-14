@@ -204,7 +204,6 @@ async def linkedin_callback(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         if token_res.status_code != 200:
-            # ⚠️ رسالة LinkedIn-specific عشان تميّزها بسهولة
             raise HTTPException(
                 status_code=401,
                 detail=f"[linkedin] token exchange failed ({token_res.status_code}): {token_res.text}",
@@ -232,8 +231,25 @@ async def linkedin_callback(
     if not email:
         raise HTTPException(status_code=400, detail="[linkedin] no email returned")
 
+    # فحص مسبق لتجنب مشكلة التعارض (Binding) في LinkedIn
+    linkedin_sub = str(info.get("sub") or "")
+    
+    existing_by_email = db.query(User).filter(User.email == email).first()
+    if existing_by_email and existing_by_email.linkedin_id and existing_by_email.linkedin_id != linkedin_sub:
+        raise HTTPException(
+            status_code=400,
+            detail="[linkedin] This email is already linked to a different LinkedIn account."
+        )
+
+    existing_by_provider = db.query(User).filter(User.linkedin_id == linkedin_sub).first()
+    if existing_by_provider and existing_by_provider.email != email:
+        raise HTTPException(
+            status_code=400,
+            detail="[linkedin] This LinkedIn account is already linked to another user."
+        )
+
     _upsert_user(db, email=email, name=info.get("name"),
-                 provider="linkedin", provider_id=info.get("sub"))
+                 provider="linkedin", provider_id=linkedin_sub)
     return _frontend_redirect(email, info.get("name") or "")
 
 
@@ -295,15 +311,24 @@ async def github_callback(
                 "Content-Type": "application/x-www-form-urlencoded",
             },
         )
+        
+        # فحص حالة الاستجابة الأساسية
         if token_res.status_code != 200:
             raise HTTPException(
                 status_code=401,
                 detail=f"[github] token endpoint returned {token_res.status_code}: {token_res.text}",
             )
 
-        token_data = token_res.json()
+        # قراءة JSON بشكل آمن
+        try:
+            token_data = token_res.json()
+        except Exception:
+            raise HTTPException(
+                status_code=401,
+                detail=f"[github] invalid JSON response: {token_res.text}",
+            )
 
-        # GitHub بيرجّع 200 حتى مع خطأ — لازم نفحص "error" صراحةً
+        # GitHub بيرجّع 200 حتى مع وجود خطأ (زي bad_verification_code)
         if token_data.get("error"):
             raise HTTPException(
                 status_code=401,
@@ -325,7 +350,7 @@ async def github_callback(
             "Accept":        "application/json",
         }
 
-        # 2) جلب المستخدم
+        # 2) جلب بيانات المستخدم
         user_res = await client.get("https://api.github.com/user", headers=headers)
         if user_res.status_code != 200:
             raise HTTPException(
@@ -334,7 +359,7 @@ async def github_callback(
             )
         user_data = user_res.json()
 
-        # 3) البريد (قد يكون مخفياً — نستخدم /user/emails)
+        # 3) جلب البريد (لأنه قد يكون مخفياً)
         email = user_data.get("email")
         if not email:
             emails_res = await client.get("https://api.github.com/user/emails", headers=headers)
