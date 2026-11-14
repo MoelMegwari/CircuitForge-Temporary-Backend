@@ -6,7 +6,8 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, User, init_db
@@ -15,7 +16,7 @@ from database import SessionLocal, User, init_db
 # إعدادات (قيم افتراضية تحافظ على السلوك الشغّال)
 # ============================================================
 FRONTEND_URL  = os.getenv("FRONTEND_URL", "https://misrpcbplceditor.vercel.app").rstrip("/")
-EDITOR_PATH   = os.getenv("EDITOR_PATH", "/editor")   # اجعلها "" لو تطبيقك بلا /editor
+EDITOR_PATH   = os.getenv("EDITOR_PATH", "/editor")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
 
 # LinkedIn
@@ -44,15 +45,13 @@ FACEBOOK_REDIRECT_URI  = os.getenv("CALLBACK_URL") or os.getenv(
 
 HTTP_TIMEOUT = httpx.Timeout(15.0, connect=10.0)
 
-
 # ============================================================
-# Lifespan + App
+# Lifespan + App + Exception Handlers
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     yield
-
 
 app = FastAPI(title="CircuitForge Auth API", lifespan=lifespan)
 
@@ -64,6 +63,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(request: Request, exc: IntegrityError):
+    """تحويل أخطاء تعارض البيانات إلى 400 بدل 500"""
+    return JSONResponse(
+        status_code=400,
+        content={"detail": "Database conflict: This email or account is already linked to another provider."},
+    )
+
+@app.exception_handler(httpx.RequestError)
+async def httpx_error_handler(request: Request, exc: httpx.RequestError):
+    """التقاط أخطاء الشبكة أثناء الاتصال بمزودي OAuth"""
+    return JSONResponse(
+        status_code=502,
+        content={"detail": f"External provider network error: {str(exc)}"},
+    )
 
 # ============================================================
 # Helpers
@@ -75,19 +89,15 @@ def get_db():
     finally:
         db.close()
 
-
 def _require(value, name: str) -> str:
     if not value:
         raise HTTPException(status_code=500, detail=f"{name} is not configured")
     return value
 
-
 def _state_cookie_name(provider: str) -> str:
     return f"oauth_state_{provider}"
 
-
 def _redirect_with_state(auth_url: str, provider: str, state: str) -> RedirectResponse:
-    """توجيه إلى المزوّد + تعيين كوكي الحالة (CSRF protection)."""
     response = RedirectResponse(url=auth_url)
     response.set_cookie(
         key=_state_cookie_name(provider),
@@ -99,7 +109,6 @@ def _redirect_with_state(auth_url: str, provider: str, state: str) -> RedirectRe
     )
     return response
 
-
 def _verify_state(request: Request, provider: str, received_state: str | None) -> None:
     cookie_state = request.cookies.get(_state_cookie_name(provider))
     if not cookie_state or not received_state:
@@ -107,16 +116,12 @@ def _verify_state(request: Request, provider: str, received_state: str | None) -
     if not secrets.compare_digest(cookie_state, received_state):
         raise HTTPException(status_code=400, detail=f"[{provider}] Invalid OAuth state")
 
-
 def _frontend_redirect(email: str, name: str) -> RedirectResponse:
-    """توجيه آمن إلى الواجهة مع URL-encoding صحيح."""
     query = urlencode({"email": email, "name": name or ""})
     return RedirectResponse(url=f"{FRONTEND_URL}{EDITOR_PATH}?{query}")
 
-
 def _upsert_user(db: Session, *, email: str, name: str | None,
                  provider: str, provider_id: str | None) -> User:
-    """إدراج/تحديث المستخدم مع ربط الـ provider_id."""
     db_user = db.query(User).filter(User.email == email).first()
     id_field = f"{provider}_id"
 
@@ -134,7 +139,6 @@ def _upsert_user(db: Session, *, email: str, name: str | None,
     db.refresh(db_user)
     return db_user
 
-
 # ============================================================
 # Basic
 # ============================================================
@@ -142,11 +146,9 @@ def _upsert_user(db: Session, *, email: str, name: str | None,
 def root():
     return {"message": "CircuitForge Auth API is running"}
 
-
 @app.get("/health")
 def health():
     return {"status": "healthy"}
-
 
 # ============================================================
 # LinkedIn OAuth
@@ -167,7 +169,6 @@ def linkedin_login():
     auth_url = "https://www.linkedin.com/oauth/v2/authorization?" + urlencode(params)
     return _redirect_with_state(auth_url, "linkedin", state)
 
-
 @app.get("/auth/linkedin/callback")
 async def linkedin_callback(
     request: Request,
@@ -178,10 +179,7 @@ async def linkedin_callback(
     db: Session = Depends(get_db),
 ):
     if error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"[linkedin] {error}: {error_description or ''}",
-        )
+        raise HTTPException(status_code=400, detail=f"[linkedin] {error}: {error_description or ''}")
     if not code:
         raise HTTPException(status_code=400, detail="[linkedin] Authorization code missing")
 
@@ -192,6 +190,7 @@ async def linkedin_callback(
     redirect_uri  = _require(LINKEDIN_REDIRECT_URI, "REDIRECT_URI")
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        # ⚠️ إزالة أي إشارة لـ PKCE أو code_verifier تماماً
         token_res = await client.post(
             "https://www.linkedin.com/oauth/v2/accessToken",
             data={
@@ -211,47 +210,35 @@ async def linkedin_callback(
 
         access_token = token_res.json().get("access_token")
         if not access_token:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[linkedin] no access_token returned: {token_res.text}",
-            )
+            raise HTTPException(status_code=400, detail=f"[linkedin] no access_token returned: {token_res.text}")
 
         user_res = await client.get(
             "https://api.linkedin.com/v2/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if user_res.status_code != 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[linkedin] userinfo failed: {user_res.text}",
-            )
+            raise HTTPException(status_code=400, detail=f"[linkedin] userinfo failed: {user_res.text}")
         info = user_res.json()
 
     email = info.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="[linkedin] no email returned")
 
-    # فحص مسبق لتجنب مشكلة التعارض (Binding) في LinkedIn
+    # فحص مسبق لتجنب مشكلة التعارض (Binding)
     linkedin_sub = str(info.get("sub") or "")
-    
+    if not linkedin_sub:
+        raise HTTPException(status_code=400, detail="[linkedin] no subject identifier returned")
+
     existing_by_email = db.query(User).filter(User.email == email).first()
     if existing_by_email and existing_by_email.linkedin_id and existing_by_email.linkedin_id != linkedin_sub:
-        raise HTTPException(
-            status_code=400,
-            detail="[linkedin] This email is already linked to a different LinkedIn account."
-        )
+        raise HTTPException(status_code=400, detail="[linkedin] This email is already linked to a different LinkedIn account.")
 
     existing_by_provider = db.query(User).filter(User.linkedin_id == linkedin_sub).first()
     if existing_by_provider and existing_by_provider.email != email:
-        raise HTTPException(
-            status_code=400,
-            detail="[linkedin] This LinkedIn account is already linked to another user."
-        )
+        raise HTTPException(status_code=400, detail="[linkedin] This LinkedIn account is already linked to another user.")
 
-    _upsert_user(db, email=email, name=info.get("name"),
-                 provider="linkedin", provider_id=linkedin_sub)
+    _upsert_user(db, email=email, name=info.get("name"), provider="linkedin", provider_id=linkedin_sub)
     return _frontend_redirect(email, info.get("name") or "")
-
 
 # ============================================================
 # GitHub OAuth
@@ -272,7 +259,6 @@ def github_login():
     auth_url = "https://github.com/login/oauth/authorize?" + urlencode(params)
     return _redirect_with_state(auth_url, "github", state)
 
-
 @app.get("/auth/github/callback")
 async def github_callback(
     request: Request,
@@ -283,10 +269,7 @@ async def github_callback(
     db: Session = Depends(get_db),
 ):
     if error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"[github] {error}: {error_description or ''}",
-        )
+        raise HTTPException(status_code=400, detail=f"[github] {error}: {error_description or ''}")
     if not code:
         raise HTTPException(status_code=400, detail="[github] Authorization code missing")
 
@@ -297,7 +280,6 @@ async def github_callback(
     redirect_uri  = _require(GITHUB_REDIRECT_URI, "GITHUB_REDIRECT_URI")
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        # 1) تبديل الكود بـ access_token باستخدام data وطريقة form-urlencoded
         token_res = await client.post(
             "https://github.com/login/oauth/access_token",
             data={
@@ -311,55 +293,31 @@ async def github_callback(
                 "Content-Type": "application/x-www-form-urlencoded",
             },
         )
-        
-        # فحص حالة الاستجابة الأساسية
         if token_res.status_code != 200:
-            raise HTTPException(
-                status_code=401,
-                detail=f"[github] token endpoint returned {token_res.status_code}: {token_res.text}",
-            )
+            raise HTTPException(status_code=401, detail=f"[github] token endpoint returned {token_res.status_code}: {token_res.text}")
 
-        # قراءة JSON بشكل آمن
         try:
             token_data = token_res.json()
         except Exception:
-            raise HTTPException(
-                status_code=401,
-                detail=f"[github] invalid JSON response: {token_res.text}",
-            )
+            raise HTTPException(status_code=401, detail=f"[github] invalid JSON response: {token_res.text}")
 
-        # GitHub بيرجّع 200 حتى مع وجود خطأ (زي bad_verification_code)
         if token_data.get("error"):
-            raise HTTPException(
-                status_code=401,
-                detail=(
-                    f"[github] {token_data.get('error')} - "
-                    f"{token_data.get('error_description', '')}"
-                ),
-            )
+            raise HTTPException(status_code=401, detail=f"[github] {token_data.get('error')} - {token_data.get('error_description', '')}")
 
         access_token = token_data.get("access_token")
         if not access_token:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[github] no access_token returned: {token_data}",
-            )
+            raise HTTPException(status_code=400, detail=f"[github] no access_token returned: {token_data}")
 
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept":        "application/json",
         }
 
-        # 2) جلب بيانات المستخدم
         user_res = await client.get("https://api.github.com/user", headers=headers)
         if user_res.status_code != 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[github] user failed: {user_res.text}",
-            )
+            raise HTTPException(status_code=400, detail=f"[github] user failed: {user_res.text}")
         user_data = user_res.json()
 
-        # 3) جلب البريد (لأنه قد يكون مخفياً)
         email = user_data.get("email")
         if not email:
             emails_res = await client.get("https://api.github.com/user/emails", headers=headers)
@@ -378,10 +336,8 @@ async def github_callback(
     name = user_data.get("name") or user_data.get("login") or email.split("@")[0]
     provider_id = str(user_data.get("id")) if user_data.get("id") else None
 
-    _upsert_user(db, email=email, name=name,
-                 provider="github", provider_id=provider_id)
+    _upsert_user(db, email=email, name=name, provider="github", provider_id=provider_id)
     return _frontend_redirect(email, name)
-
 
 # ============================================================
 # Facebook OAuth
@@ -402,7 +358,6 @@ def facebook_login():
     auth_url = "https://www.facebook.com/v18.0/dialog/oauth?" + urlencode(params)
     return _redirect_with_state(auth_url, "facebook", state)
 
-
 @app.get("/auth/facebook/callback")
 async def facebook_callback(
     request: Request,
@@ -413,10 +368,7 @@ async def facebook_callback(
     db: Session = Depends(get_db),
 ):
     if error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"[facebook] {error}: {error_description or ''}",
-        )
+        raise HTTPException(status_code=400, detail=f"[facebook] {error}: {error_description or ''}")
     if not code:
         raise HTTPException(status_code=400, detail="[facebook] Authorization code missing")
 
@@ -437,33 +389,23 @@ async def facebook_callback(
             },
         )
         if token_res.status_code != 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[facebook] token failed: {token_res.text}",
-            )
+            raise HTTPException(status_code=400, detail=f"[facebook] token failed: {token_res.text}")
 
         access_token = token_res.json().get("access_token")
         if not access_token:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[facebook] no access_token returned: {token_res.text}",
-            )
+            raise HTTPException(status_code=400, detail=f"[facebook] no access_token returned: {token_res.text}")
 
         user_res = await client.get(
             "https://graph.facebook.com/v18.0/me",
             params={"fields": "id,name,email", "access_token": access_token},
         )
         if user_res.status_code != 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"[facebook] profile failed: {user_res.text}",
-            )
+            raise HTTPException(status_code=400, detail=f"[facebook] profile failed: {user_res.text}")
         info = user_res.json()
 
     fb_id = str(info.get("id") or "")
     email = info.get("email") or f"{fb_id}@facebook-user.local"
     name  = info.get("name") or "Facebook User"
 
-    _upsert_user(db, email=email, name=name,
-                 provider="facebook", provider_id=fb_id or None)
+    _upsert_user(db, email=email, name=name, provider="facebook", provider_id=fb_id or None)
     return _frontend_redirect(email, name)
