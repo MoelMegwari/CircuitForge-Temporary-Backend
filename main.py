@@ -103,9 +103,9 @@ def _redirect_with_state(auth_url: str, provider: str, state: str) -> RedirectRe
 def _verify_state(request: Request, provider: str, received_state: str | None) -> None:
     cookie_state = request.cookies.get(_state_cookie_name(provider))
     if not cookie_state or not received_state:
-        raise HTTPException(status_code=400, detail="Missing OAuth state")
+        raise HTTPException(status_code=400, detail=f"[{provider}] Missing OAuth state")
     if not secrets.compare_digest(cookie_state, received_state):
-        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+        raise HTTPException(status_code=400, detail=f"[{provider}] Invalid OAuth state")
 
 
 def _frontend_redirect(email: str, name: str) -> RedirectResponse:
@@ -174,12 +174,16 @@ async def linkedin_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
+    error_description: str | None = None,
     db: Session = Depends(get_db),
 ):
     if error:
-        raise HTTPException(status_code=400, detail=f"LinkedIn error: {error}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"[linkedin] {error}: {error_description or ''}",
+        )
     if not code:
-        raise HTTPException(status_code=400, detail="Authorization code missing")
+        raise HTTPException(status_code=400, detail="[linkedin] Authorization code missing")
 
     _verify_state(request, "linkedin", state)
 
@@ -200,23 +204,33 @@ async def linkedin_callback(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         if token_res.status_code != 200:
-            raise HTTPException(status_code=401, detail=f"Token exchange failed: {token_res.text}")
+            # ⚠️ رسالة LinkedIn-specific عشان تميّزها بسهولة
+            raise HTTPException(
+                status_code=401,
+                detail=f"[linkedin] token exchange failed ({token_res.status_code}): {token_res.text}",
+            )
 
         access_token = token_res.json().get("access_token")
         if not access_token:
-            raise HTTPException(status_code=400, detail="No access_token returned by LinkedIn")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[linkedin] no access_token returned: {token_res.text}",
+            )
 
         user_res = await client.get(
             "https://api.linkedin.com/v2/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if user_res.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Userinfo failed: {user_res.text}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[linkedin] userinfo failed: {user_res.text}",
+            )
         info = user_res.json()
 
     email = info.get("email")
     if not email:
-        raise HTTPException(status_code=400, detail="LinkedIn did not return an email")
+        raise HTTPException(status_code=400, detail="[linkedin] no email returned")
 
     _upsert_user(db, email=email, name=info.get("name"),
                  provider="linkedin", provider_id=info.get("sub"))
@@ -249,12 +263,16 @@ async def github_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
+    error_description: str | None = None,
     db: Session = Depends(get_db),
 ):
     if error:
-        raise HTTPException(status_code=400, detail=f"GitHub error: {error}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"[github] {error}: {error_description or ''}",
+        )
     if not code:
-        raise HTTPException(status_code=400, detail="Authorization code missing")
+        raise HTTPException(status_code=400, detail="[github] Authorization code missing")
 
     _verify_state(request, "github", state)
 
@@ -263,7 +281,7 @@ async def github_callback(
     redirect_uri  = _require(GITHUB_REDIRECT_URI, "GITHUB_REDIRECT_URI")
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        # 1) تبديل الكود بـ access_token (form-encoded حسب توثيق GitHub)
+        # 1) تبديل الكود بـ access_token باستخدام data وطريقة form-urlencoded
         token_res = await client.post(
             "https://github.com/login/oauth/access_token",
             data={
@@ -278,23 +296,29 @@ async def github_callback(
             },
         )
         if token_res.status_code != 200:
-            raise HTTPException(status_code=401, detail=f"GitHub token failed: {token_res.text}")
+            raise HTTPException(
+                status_code=401,
+                detail=f"[github] token endpoint returned {token_res.status_code}: {token_res.text}",
+            )
 
         token_data = token_res.json()
 
-        # GitHub بيرجّع 200 حتى في حالة خطأ — لازم نفحص "error" صراحةً
+        # GitHub بيرجّع 200 حتى مع خطأ — لازم نفحص "error" صراحةً
         if token_data.get("error"):
             raise HTTPException(
                 status_code=401,
                 detail=(
-                    f"GitHub OAuth error: {token_data.get('error')} - "
+                    f"[github] {token_data.get('error')} - "
                     f"{token_data.get('error_description', '')}"
                 ),
             )
 
         access_token = token_data.get("access_token")
         if not access_token:
-            raise HTTPException(status_code=400, detail="No access_token returned by GitHub")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[github] no access_token returned: {token_data}",
+            )
 
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -304,7 +328,10 @@ async def github_callback(
         # 2) جلب المستخدم
         user_res = await client.get("https://api.github.com/user", headers=headers)
         if user_res.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"GitHub user failed: {user_res.text}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[github] user failed: {user_res.text}",
+            )
         user_data = user_res.json()
 
         # 3) البريد (قد يكون مخفياً — نستخدم /user/emails)
@@ -357,12 +384,16 @@ async def facebook_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
+    error_description: str | None = None,
     db: Session = Depends(get_db),
 ):
     if error:
-        raise HTTPException(status_code=400, detail=f"Facebook error: {error}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"[facebook] {error}: {error_description or ''}",
+        )
     if not code:
-        raise HTTPException(status_code=400, detail="Authorization code missing")
+        raise HTTPException(status_code=400, detail="[facebook] Authorization code missing")
 
     _verify_state(request, "facebook", state)
 
@@ -381,18 +412,27 @@ async def facebook_callback(
             },
         )
         if token_res.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Facebook token failed: {token_res.text}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[facebook] token failed: {token_res.text}",
+            )
 
         access_token = token_res.json().get("access_token")
         if not access_token:
-            raise HTTPException(status_code=400, detail="No access_token returned by Facebook")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[facebook] no access_token returned: {token_res.text}",
+            )
 
         user_res = await client.get(
             "https://graph.facebook.com/v18.0/me",
             params={"fields": "id,name,email", "access_token": access_token},
         )
         if user_res.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Facebook profile failed: {user_res.text}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"[facebook] profile failed: {user_res.text}",
+            )
         info = user_res.json()
 
     fb_id = str(info.get("id") or "")
