@@ -122,17 +122,19 @@ def _frontend_redirect(email: str, name: str) -> RedirectResponse:
 
 def _upsert_user(db: Session, *, email: str, name: str | None,
                  provider: str, provider_id: str | None) -> User:
+    """إدراج/تحديث المستخدم مع التعامل المرن مع الـ provider_id."""
     db_user = db.query(User).filter(User.email == email).first()
     id_field = f"{provider}_id"
 
     if db_user is None:
         db_user = User(email=email, name=name or email.split("@")[0])
-        setattr(db_user, id_field, provider_id)
+        if provider_id and hasattr(db_user, id_field):
+            setattr(db_user, id_field, provider_id)
         db.add(db_user)
     else:
         if name and not db_user.name:
             db_user.name = name
-        if provider_id and getattr(db_user, id_field) is None:
+        if provider_id and hasattr(db_user, id_field) and getattr(db_user, id_field) is None:
             setattr(db_user, id_field, provider_id)
 
     db.commit()
