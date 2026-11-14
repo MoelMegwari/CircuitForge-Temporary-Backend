@@ -8,10 +8,8 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal, User, init_db
 
-# 1. إنشاء تطبيق FastAPI
 app = FastAPI(title="CircuitForge Temporary API")
 
-# 2. إعداد الـ CORS Middleware
 ALLOWED_ORIGINS = ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -21,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# إنشاء الجداول عند بدء التشغيل
 @app.on_event("startup")
 def startup_event():
     init_db()
@@ -33,17 +30,14 @@ def get_db():
     finally:
         db.close()
 
-# قراءة متغيرات البيئة الخاصة بـ LinkedIn
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID", "788auwtd0set09")
 LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET", "WPL_AP1.Bbmma9ynZ5LIV23T.dUAy7w==")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://web-production-598c28d9.up.railway.app/auth/linkedin/callback")
 
-# قراءة متغيرات البيئة الخاصة بـ Facebook
 FACEBOOK_CLIENT_ID = os.getenv("CLIENT_ID")
 FACEBOOK_CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 FACEBOOK_REDIRECT_URI = os.getenv("CALLBACK_URL", "https://web-production-598c28d9.up.railway.app/auth/facebook/callback")
 
-# 3. المسارات الأساسية
 @app.get("/")
 def root():
     return {"message": "CircuitForge Temporary API is running"}
@@ -52,9 +46,6 @@ def root():
 def health():
     return {"status": "healthy"}
 
-# ==========================================
-# 4. مسارات LinkedIn OAuth (مع الحفظ والتوجيه)
-# ==========================================
 @app.get("/auth/linkedin/login")
 def linkedin_login():
     if not LINKEDIN_CLIENT_ID:
@@ -79,7 +70,6 @@ def linkedin_callback(code: str = None, error: str = None, db: Session = Depends
         raise HTTPException(status_code=400, detail=f"Auth error: {error} or code missing")
 
     try:
-        # 1. تبديل الكود بـ Access Token
         token_res = requests.post(
             "https://www.linkedin.com/oauth/v2/accessToken",
             data={
@@ -97,7 +87,6 @@ def linkedin_callback(code: str = None, error: str = None, db: Session = Depends
         
         access_token = token_res.json().get("access_token")
 
-        # 2. جلب بيانات المستخدم من LinkedIn
         user_res = requests.get(
             "https://api.linkedin.com/v2/userinfo",
             headers={"Authorization": f"Bearer {access_token}"}
@@ -114,7 +103,6 @@ def linkedin_callback(code: str = None, error: str = None, db: Session = Depends
         if not email:
             raise HTTPException(status_code=400, detail="Email not provided by LinkedIn profile.")
 
-        # 3. حفظ المستخدم في قاعدة بيانات MySQL على Railway إذا لم يكن موجوداً
         db_user = db.query(User).filter(User.email == email).first()
         if not db_user:
             db_user = User(linkedin_id=linkedin_id, name=name, email=email)
@@ -122,18 +110,14 @@ def linkedin_callback(code: str = None, error: str = None, db: Session = Depends
             db.commit()
             db.refresh(db_user)
 
-        # 4. التوجيه النهائي لصفحة المحرر على Vercel مع تمرير بيانات المستخدم
-        frontend_editor_url = f"https://megwari-pcb-editor.vercel.app/editor?email={email}&name={name}"
+        # ✅ التعديل: تم استبدال الرابط القديم بالجديد
+        frontend_editor_url = f"https://misrpcbplceditor.vercel.app?email={email}&name={name}"
         return RedirectResponse(url=frontend_editor_url)
 
     except Exception as e:
         print(f"CRITICAL ERROR IN CALLBACK: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ==========================================
-# 5. مسارات Facebook OAuth
-# ==========================================
 @app.get("/auth/facebook/login")
 def facebook_login():
     if not FACEBOOK_CLIENT_ID:
@@ -191,4 +175,3 @@ async def facebook_callback(code: str = None, error: str = None):
         "message": "Facebook authentication successful",
         "user_profile": user_info
 }
-                
