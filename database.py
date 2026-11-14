@@ -23,11 +23,10 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     name = Column(String(255), nullable=True)
 
-    # إضافة معرفات مزودي الـ OAuth
-    linkedin_id = Column(String(255), nullable=True, unique=True, index=True)
-    github_id = Column(String(255), nullable=True, unique=True, index=True)
-    gitlab_id = Column(String(255), nullable=True, unique=True, index=True)
-    facebook_id = Column(String(255), nullable=True, unique=True, index=True)
+    linkedin_id = Column(String(255), nullable=True)
+    github_id = Column(String(255), nullable=True)
+    gitlab_id = Column(String(255), nullable=True)
+    facebook_id = Column(String(255), nullable=True)
 
     created_at = Column(
         DateTime,
